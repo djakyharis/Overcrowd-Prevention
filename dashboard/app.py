@@ -1,64 +1,61 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+import requests
+import pandas as pd
 
+# =========================
+# PAGE CONFIG
+# =========================
 st.set_page_config(
     page_title="Overcrowd Demo Dashboard",
     layout="wide"
 )
 
-from streamlit_autorefresh import st_autorefresh
-import redis
-import json
-import pandas as pd
-import psycopg2
-
-
-# Refresh every 3 seconds
+# =========================
+# AUTO REFRESH
+# =========================
 st_autorefresh(interval=3000, key="auto_refresh")
 
-
-# Redis
-REDIS_URL = "redis://localhost:6379/0"
-r = redis.from_url(REDIS_URL, decode_responses=True)
-
-
-# PostgreSQL
-PG_DSN = (
-    "dbname=demo_overcrowd "
-    "user=demo password=demo_pass "
-    "host=localhost port=5432"
-)
-
-def pg_connect():
-    return psycopg2.connect(PG_DSN)
-
+# =========================
+# API CONFIG
+# =========================
+API_BASE = "http://127.0.0.1:8000"
 
 st.title("Overcrowd Prevention Dashboard (Demo Simulation)")
 
-
-# Load venues from Redis
+# =========================
+# LOAD VENUES (FROM API)
+# =========================
 def get_venues():
-    keys = r.keys("venue:*")
-    return sorted([k.split(":")[1].strip() for k in keys])
+    try:
+        resp = requests.get(f"{API_BASE}/venues")
+        data = resp.json()
+        return sorted([v["venue_id"] for v in data])
+    except Exception:
+        return []
 
 venues = get_venues()
 
 if not venues:
-    st.warning("Belum ada data di Redis. Jalankan `python main.py`.")
+    st.warning("Belum ada data dari API. Pastikan `main.py` & FastAPI berjalan.")
     st.stop()
 
-selected_raw = st.sidebar.selectbox("Pilih Venue", venues)
-selected = selected_raw.strip()   # FIX
+selected = st.sidebar.selectbox("Pilih Venue", venues)
 
-
-# LEFT PANEL — REAL-TIME
+# =========================
+# LAYOUT
+# =========================
 col1, col2 = st.columns([1, 2])
 
+# =========================
+# LEFT PANEL — REAL-TIME
+# =========================
 with col1:
     st.subheader("Real-Time Status")
 
-    data_raw = r.get(f"venue:{selected}")
-    if data_raw:
-        payload = json.loads(data_raw)
+    resp = requests.get(f"{API_BASE}/venues/{selected}")
+    if resp.status_code == 200:
+        payload = resp.json()
 
         st.metric("Venue ID", payload.get("venue_id"))
         st.metric("Count", payload.get("count"))
@@ -67,36 +64,29 @@ with col1:
         st.write("Confidence:", payload.get("confidence"))
         st.write("Last Update (UTC):", payload.get("event_time"))
     else:
-        st.info("No data found.")
+        st.info("Data venue tidak ditemukan.")
 
-
-# RIGHT PANEL — HISTORICAL DATA
+# =========================
+# RIGHT PANEL — HISTORICAL
+# =========================
 with col2:
-    st.subheader("Historical Data (PostgreSQL)")
+    st.subheader("Historical Data")
 
-    try:
-        conn = pg_connect()
+    resp = requests.get(
+        f"{API_BASE}/venues/{selected}/history",
+        params={"limit": 200}
+    )
 
-        query = """
-            SELECT event_time, count, status
-            FROM occupancy_log
-            WHERE venue_id = %s
-            ORDER BY event_time DESC
-            LIMIT 200
-        """
-
-        df = pd.read_sql(query, conn, params=(selected,))
-        conn.close()
+    if resp.status_code == 200:
+        df = pd.DataFrame(resp.json())
 
         if df.empty:
             st.info("Belum ada data historical.")
         else:
             df["event_time"] = pd.to_datetime(df["event_time"])
-            df = df.dropna(subset=["event_time"])
             df = df.sort_values("event_time")
 
             st.line_chart(df.set_index("event_time")["count"])
             st.dataframe(df.tail(50))
-
-    except Exception as e:
-        st.error(f"Error connecting to PostgreSQL: {e}")
+    else:
+        st.error("Gagal mengambil data historical dari API.")
